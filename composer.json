@@ -1,7 +1,8 @@
 {
-    "name": "kohana/bouncer",
-    "type": "kohana/module",
+    "name": "arteymix/bouncer",
+    "type": "kohana-module",
     "homepage": "http://github.com/arteymix/kohana-bouncer",
+    "description": "Role management for the Kohana framework.",
     "license": "BSD-3-Clause",
     "authors": [
         {
