@@ -5,164 +5,173 @@ defined('SYSPATH') or die('No direct script access.');
 /**
  * Boucer!
  * 
- * if (!Bouncer::factory()->user($user)->may('predefined action')) {
- * 
- *     throw new HTTP_Exception_403('You need the :role to perform :action.', $reason);
- * }
- * 
  * @package Bouncer
  * @author  Guillaume Poirier-Morency <guillaumepoiriermorency@gmail.com>
- * @license BSD 3-clauses
+ * @license BSD-3-Clauses
  */
 class Kohana_Bouncer {
 
-    public static $default = 'default';
+	public static $default = 'default';
 
-    /**
-     * 
-     * @param  string $group
-     * @return Bouncer
-     */
-    public static function factory($group = NULL) {
+	/**
+	 * 
+	 * @param  string $group
+	 * @return Bouncer
+	 */
+	public static function factory($group = NULL)
+	{
+		if ($group === NULL)
+		{
+			$group = Bouncer::$default;
+		}
 
-        if ($group === NULL) {
+		$rules = (array) Kohana::$config->load('bouncer.' . $group);
 
-            $group = Bouncer::$default;
-        }
+		return new Bouncer($rules);
+	}
 
-        $rules = (array) Kohana::$config->load('bouncer.' . $group);
+	/**
+	 *
+	 * @var Model_User
+	 */
+	private $user;
 
-        return new Bouncer($rules);
-    }
+	/**
+	 * 
+	 * @param array $rules
+	 */
+	public function __construct(array $rules)
+	{
+		$this->rules = $rules;
 
-    /**
-     * 
-     * @param array $rules
-     */
-    public function __construct(array $rules) {
+		if (Auth::instance()->logged_in())
+		{
+			$this->user = Auth::instance()->get_user();
+		}
+	}
 
-        $this->rules = $rules;
+	/**
+	 * Set the user.
+	 * 
+	 * Use this method if you want to make a rule check for an arbitrary user.
+	 * 
+	 * @param  Model_Auth_User $user
+	 * @return Bouncer
+	 */
+	public function user(Model_Auth_User $user)
+	{
+		$this->user = $user;
 
-        $this->user = Auth::instance()->logged_in() ? Auth::instance()->get_user() : ORM::factory('User');
-    }
+		return $this;
+	}
 
-    /**
-     * 
-     * 
-     * @param  Model_Auth_User $user
-     * @return \Bouncer
-     */
-    public function user(Model_Auth_User $user) {
+	/**
+	 * Check if a given user may do a given action.
+	 *
+	 * Applies rules recursively in the logic tree.
+	 *
+	 * @param Model_Auth_User $user
+	 * @param string          $action
+	 */
+	public function may($action)
+	{
+		$rules = Arr::path($this->rules, $action);
 
-        $this->user = $user;
+		if ($rules === NULL)
+		{
+			throw new Kohana_Exception('No rules has been defined for action :action.', array(':action' => $action));
+		}
 
-        return $this;
-    }
+		if ($this->user === NULL)
+		{
+			return FALSE;
+		}
 
-    /**
-     * Check if a given user may do a given action.
-     *
-     * Applies rules recursively in the logic tree.
-     *
-     * @param Model_Auth_User $user
-     * @param string          $action
-     */
-    public function may($action) {
+		$roles = $this->user->roles->find_all()->as_array('id', 'name');
 
-        $rules = Arr::path($this->rules, $action);
+		// rules is a role
+		if (is_string($rules))
+		{
+			return in_array($rules, $roles, TRUE);
+		}
 
-        if ($rules === NULL) {
+		// associative arrays are logic tree
+		if (Arr::is_assoc($rules))
+		{
+			if (count($rules) !== 1)
+			{
+				throw new Kohana_Exception('Logic tree can only have one operator per level.');
+			}
 
-            throw new Kohana_Exception('No rules has been defined for action :action.', array(':action' => $action));
-        }
+			$operator = Arr::get(array_keys($rules), 0);
+			$operands = Arr::get(array_values($rules), 0);
 
-        $roles = $this->user->roles->find_all()->as_array('id', 'name');
+			switch ($operator)
+			{
+				case 'and':
+					// false if any is false
+					foreach ($operands as $index => $operand)
+					{
+						$not = ($index === 'not');
 
-        // rules is a role
-        if (is_string($rules)) {
+						// check if operand is a rule
+						if (is_string($operand))
+						{
+							if (in_array($operand, $roles, TRUE) === $not)
+							{
+								return FALSE;
+							}
 
-            return in_array($rules, $roles, TRUE);
-        }
+							continue;
+						}
 
-        // associative arrays are logic tree
-        if (Arr::is_assoc($rules)) {
+						// operand is a logic subtree
+						if ($this->may($action . '.and.' . $index) === $not)
+						{
+							return FALSE;
+						}
+					}
 
-            if (count($rules) !== 1) {
+					return TRUE;
 
-                throw new Kohana_Exception('Logic tree can only have one operator per level.');
-            }
+				case 'or':
 
-            $operator = Arr::get(array_keys($rules), 0);
-            $operands = Arr::get(array_values($rules), 0);
+					// true if any is true
+					foreach ($operands as $index => $operand)
+					{
+						$not = ($index === 'not');
 
-            switch ($operator) {
+						// check if operand is a rule
+						if (is_string($operand))
+						{
 
-                case 'and':
+							if (in_array($operand, $roles, TRUE) !== $not)
+							{
+								return TRUE;
+							}
 
-                    // false if any is false
-                    foreach ($operands as $index => $operand) {
+							continue;
+						}
 
-                        $not = ($index === 'not');
+						// operand is a logic subtree
+						if ($this->may($action . '.or.' . $index) !== $not)
+						{
+							return TRUE;
+						}
+					}
 
-                        // check if operand is a rule
-                        if (is_string($operand)) {
+					return FALSE;
 
-                            if (in_array($operand, $roles, TRUE) === $not) {
+				case 'not':
+					return !$this->may($action . '.not');
 
-                                return FALSE;
-                            }
+				default:
+					throw new Kohana_Exception('Undefined operand :operand in :action action.', array(':operand' => $operand, ':action' => $action));
+			}
+		}
 
-                            continue;
-                        }
-
-                        // operand is a logic subtree
-                        if ($this->may($action . '.and.' . $index) === $not) {
-
-                            return FALSE;
-                        }
-                    }
-
-                    return TRUE;
-
-                case 'or':
-
-                    // true if any is true
-                    foreach ($operands as $index => $operand) {
-
-                        $not = ($index === 'not');
-
-                        // check if operand is a rule
-                        if (is_string($operand)) {
-
-                            if (in_array($operand, $roles, TRUE) !== $not) {
-
-                                return TRUE;
-                            }
-
-                            continue;
-                        }
-
-                        // operand is a logic subtree
-                        if ($this->may($action . '.or.' . $index) !== $not) {
-
-                            return TRUE;
-                        }
-                    }
-
-                    return FALSE;
-
-                case 'not':
-
-                    return !$this->may($action . '.not');
-
-                default:
-
-                    throw new Kohana_Exception('Undefined operand :operand in :action action.', array(':operand' => $operand, ':action' => $action));
-            }
-        }
-
-        // negate anything as a default behiavior
-        return FALSE;
-    }
+		// negate anything as a default behiavior
+		return FALSE;
+	}
 
 }
